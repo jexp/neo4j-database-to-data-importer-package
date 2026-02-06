@@ -5,6 +5,7 @@ description = "Neo4j graph export to CSV with importer model generation"
 requires-python = ">=3.13"
 dependencies = [
     "neo4j-rust-ext>=6.1.0.0",
+    "python-dotenv>=1.2.1",
 ]
 
 [project.scripts]

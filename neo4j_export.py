@@ -6,24 +6,36 @@ and generates a neo4j_importer_model.json mapping file.
 """
 
 import os
+import sys
 import json
 import csv
-from typing import Dict, List, Any, Tuple
+import argparse
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Any, Tuple, Optional
 from neo4j import GraphDatabase
+from dotenv import load_dotenv
 import uuid
 
 
 class Neo4jExporter:
     def __init__(self, uri: str, user: str, password: str, output_dir: str = "paysim",
-                 format_version: str = "3.0"):
+                 format_version: str = "3.0", database: Optional[str] = None):
         """Initialize Neo4j connection and output directory.
 
         Args:
+            uri: Neo4j connection URI
+            user: Neo4j username
+            password: Neo4j password
+            output_dir: Directory to write CSV files and model JSON
             format_version: "3.0" for latest format (default), "2.4.0" for beta format, "0.1.0" for legacy
+            database: Neo4j database name (optional, defaults to server default)
         """
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
         self.output_dir = output_dir
         self.format_version = format_version
+        self.database = database
         self.metadata = {}
         self.unique_constraints = {}
         self.indexes = []
@@ -37,9 +49,15 @@ class Neo4jExporter:
         """Close the Neo4j driver connection."""
         self.driver.close()
 
+    def _session(self):
+        """Create a session with optional database parameter."""
+        if self.database:
+            return self.driver.session(database=self.database)
+        return self.driver.session()
+
     def get_graph_metadata(self):
         """Retrieve graph metadata using apoc.meta.data."""
-        with self.driver.session() as session:
+        with self._session() as session:
             # Get metadata from apoc.meta.data
             result = session.run("CALL apoc.meta.data()")
 
@@ -64,7 +82,7 @@ class Neo4jExporter:
 
     def get_unique_constraints(self):
         """Get unique constraints to identify business identifiers."""
-        with self.driver.session() as session:
+        with self._session() as session:
             # Get constraints (works for Neo4j 4.x and 5.x)
             try:
                 result = session.run("SHOW CONSTRAINTS")
@@ -160,7 +178,7 @@ class Neo4jExporter:
         """Get all indexes from the database."""
         self.indexes = []
 
-        with self.driver.session() as session:
+        with self._session() as session:
             try:
                 # Try modern SHOW INDEXES command (Neo4j 4.0+)
                 result = session.run("SHOW INDEXES")
@@ -212,7 +230,7 @@ class Neo4jExporter:
         """Get detailed constraint information."""
         self.constraints = []
 
-        with self.driver.session() as session:
+        with self._session() as session:
             try:
                 result = session.run("SHOW CONSTRAINTS")
 
@@ -255,7 +273,7 @@ class Neo4jExporter:
 
         exported_files = {}
 
-        with self.driver.session() as session:
+        with self._session() as session:
             for label in node_labels:
                 print(f"Exporting nodes with label: {label}")
 
@@ -320,7 +338,7 @@ class Neo4jExporter:
 
         exported_files = {}
 
-        with self.driver.session() as session:
+        with self._session() as session:
             # First, discover all unique (source_label, rel_type, target_label) patterns
             print("Discovering relationship patterns...")
             patterns = []
@@ -1219,8 +1237,47 @@ class Neo4jExporter:
 
         return "string"
 
-    def export_all(self):
-        """Run the complete export process."""
+    def create_zip(self, zip_path: Optional[str] = None) -> str:
+        """Create a zip file containing all exported files.
+
+        Args:
+            zip_path: Optional custom path for zip file. If not provided,
+                     generates name based on output_dir and timestamp.
+
+        Returns:
+            Path to created zip file
+        """
+        if not zip_path:
+            # Generate timestamp-based zip filename
+            timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+            basename = Path(self.output_dir).name
+            zip_path = f"{basename}-export-{timestamp}.zip"
+
+        print(f"\nCreating zip file: {zip_path}")
+
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Add all CSV files and the model JSON
+            for file in Path(self.output_dir).glob('*'):
+                if file.is_file() and (file.suffix == '.csv' or file.name == 'neo4j_importer_model.json'):
+                    # Store with relative path (just the filename)
+                    zipf.write(file, arcname=file.name)
+                    print(f"  Added: {file.name}")
+
+        file_size = Path(zip_path).stat().st_size
+        size_mb = file_size / (1024 * 1024)
+        print(f"Zip file created: {zip_path} ({size_mb:.1f} MB)")
+
+        return zip_path
+
+    def export_all(self, create_zip: bool = True) -> Optional[str]:
+        """Run the complete export process.
+
+        Args:
+            create_zip: Whether to create a zip file after export
+
+        Returns:
+            Path to zip file if created, None otherwise
+        """
         print("=== Starting Neo4j Export ===\n")
 
         print("Step 1: Retrieving graph metadata...")
@@ -1262,24 +1319,150 @@ class Neo4jExporter:
         print(f"Relationship types exported: {len(rel_files)}")
         print(f"Output directory: {self.output_dir}")
 
+        # Create zip file if requested
+        zip_path = None
+        if create_zip:
+            zip_path = self.create_zip()
+
+        return zip_path
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Export Neo4j database to Neo4j Data Importer format",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Configuration Priority (highest to lowest):
+  1. Command line arguments
+  2. Environment variables
+  3. .env file
+  4. Default values
+
+Examples:
+  # Using CLI arguments
+  %(prog)s -u bolt://localhost -U neo4j -P password -o myexport
+
+  # Using .env file
+  %(prog)s --env-file .env.production -o myexport
+
+  # Using environment variables
+  export NEO4J_URI=bolt://localhost
+  export NEO4J_USER=neo4j
+  export NEO4J_PASSWORD=password
+  %(prog)s -o myexport
+        """
+    )
+
+    # Connection arguments
+    conn_group = parser.add_argument_group('connection options')
+    conn_group.add_argument(
+        "-u", "--uri",
+        help="Neo4j connection URI (default: bolt://localhost or NEO4J_URI env var)"
+    )
+    conn_group.add_argument(
+        "-U", "--user",
+        help="Neo4j username (default: neo4j or NEO4J_USER env var)"
+    )
+    conn_group.add_argument(
+        "-P", "--password",
+        help="Neo4j password (default: password or NEO4J_PASSWORD env var)"
+    )
+    conn_group.add_argument(
+        "-d", "--database",
+        help="Neo4j database name (default: neo4j or NEO4J_DATABASE env var)"
+    )
+
+    # Output arguments
+    output_group = parser.add_argument_group('output options')
+    output_group.add_argument(
+        "-o", "--output",
+        help="Output directory/basename for export (default: paysim or OUTPUT_DIR env var)"
+    )
+    output_group.add_argument(
+        "-f", "--format",
+        choices=["3.0", "2.4.0", "0.1.0"],
+        help="Data Importer format version (default: 3.0 or FORMAT_VERSION env var)"
+    )
+    output_group.add_argument(
+        "-z", "--zip",
+        help="Custom zip file name (default: auto-generated with timestamp)"
+    )
+    output_group.add_argument(
+        "--no-zip",
+        action="store_true",
+        help="Skip creating zip file (only export CSVs and JSON)"
+    )
+
+    # Config file
+    parser.add_argument(
+        "--env-file",
+        help="Path to .env file (default: .env in current directory if exists)"
+    )
+
+    return parser.parse_args()
+
+
+def load_config(args):
+    """Load configuration from multiple sources with priority."""
+    # Load .env file if specified or if default exists
+    env_file = args.env_file if args.env_file else ".env"
+    if os.path.exists(env_file):
+        print(f"Loading configuration from {env_file}")
+        load_dotenv(env_file)
+    elif args.env_file:
+        print(f"Warning: Specified env file {args.env_file} not found", file=sys.stderr)
+
+    # Priority: CLI args > env vars > defaults
+    config = {
+        "uri": args.uri or os.getenv("NEO4J_URI", "bolt://localhost"),
+        "user": args.user or os.getenv("NEO4J_USER", "neo4j"),
+        "password": args.password or os.getenv("NEO4J_PASSWORD", "password"),
+        "database": args.database or os.getenv("NEO4J_DATABASE"),
+        "output_dir": args.output or os.getenv("OUTPUT_DIR", "paysim"),
+        "format_version": args.format or os.getenv("FORMAT_VERSION", "3.0")
+    }
+
+    return config
+
 
 def main():
     """Main entry point."""
-    # Get configuration from environment variables
-    uri = os.getenv("NEO4J_URI", "bolt://localhost")
-    user = os.getenv("NEO4J_USER", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "password")
-    output_dir = os.getenv("OUTPUT_DIR", "paysim")
-    format_version = os.getenv("FORMAT_VERSION", "3.0")  # Default to 3.0 for latest format
+    args = parse_args()
+    config = load_config(args)
 
-    print(f"Connecting to Neo4j at {uri}")
-    print(f"Output directory: {output_dir}")
-    print(f"Format version: {format_version}\n")
+    print(f"Connecting to Neo4j at {config['uri']}")
+    if config['database']:
+        print(f"Database: {config['database']}")
+    print(f"Output directory: {config['output_dir']}")
+    print(f"Format version: {config['format_version']}")
+    if args.no_zip:
+        print("Zip creation: Disabled")
+    elif args.zip:
+        print(f"Zip file: {args.zip}")
+    print()
 
-    exporter = Neo4jExporter(uri, user, password, output_dir, format_version)
+    exporter = Neo4jExporter(
+        config['uri'],
+        config['user'],
+        config['password'],
+        config['output_dir'],
+        config['format_version'],
+        config['database']
+    )
 
     try:
-        exporter.export_all()
+        # Run export
+        create_zip = not args.no_zip
+        zip_path = exporter.export_all(create_zip=create_zip)
+
+        # Create custom-named zip if specified
+        if create_zip and args.zip and zip_path:
+            # Rename the auto-generated zip to custom name
+            import shutil
+            shutil.move(zip_path, args.zip)
+            print(f"\nRenamed zip to: {args.zip}")
+
     finally:
         exporter.close()
 
