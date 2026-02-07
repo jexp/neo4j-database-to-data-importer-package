@@ -8,3 +8,51 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Export directories (output from neo4j_export.py)
+paysim/
+paysim_*/
+cybersecurity/
+cybersecurity_*/
+*_test/
+*_export/
+*-export-*/
+
+# Generated zip files
+*.zip
+
+# Test and temporary files
+check_*.py
+compare_*.py
+count_*.py
+main.py
+task.txt
+PLAN.md
+FORMAT_CHANGES.md
+
+# Test configuration
+pytest.ini
+tests/
+
+# Environment files (except example)
+.env
+.env.*
+!.env.example
+
+# Credentials
+*Credentials*.txt
+*credentials*.txt
+
+# Reference/example data directories
+northwind/
+server_source/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
