@@ -379,9 +379,15 @@ class Neo4jExporter:
                     print(f"  Warning: Missing identifier for {source_label} or {target_label}, skipping")
                     continue
 
-                # Determine column names - always use label prefix
-                source_col_name = f"{source_label}_{source_id_prop}"
-                target_col_name = f"{target_label}_{target_id_prop}"
+                # Determine column names - check for self-relationships
+                if source_label == target_label and source_id_prop == target_id_prop:
+                    # Self-relationship: add _source/_target suffix to avoid duplicate columns
+                    source_col_name = f"{source_label}_{source_id_prop}_source"
+                    target_col_name = f"{target_label}_{target_id_prop}_target"
+                else:
+                    # Normal case: use label_property format
+                    source_col_name = f"{source_label}_{source_id_prop}"
+                    target_col_name = f"{target_label}_{target_id_prop}"
 
                 # Collect all relationships and properties
                 for record in result:
